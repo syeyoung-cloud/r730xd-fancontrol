@@ -52,12 +52,12 @@ unknown_after = "15s"
 	}
 }
 
-// safe.check_duty defaults to 15 %, but never above safe.duty (a config with a lower safe duty stays valid).
+// safe.check_duty defaults to 15 %, kept well below safe.duty (0.75 x), so the fans have a margin.
 func TestConfigCheckDutyDefault(t *testing.T) {
 	for _, tc := range []struct {
 		file string
 		want float64
-	}{{"", 15}, {"[safe]\nduty = 12\n", 12}, {"[safe]\nduty = 30\n", 15}, {"[safe]\ncheck_duty = 18\n", 18}} {
+	}{{"", 15}, {"[safe]\nduty = 12\n", 9}, {"[safe]\nduty = 30\n", 15}, {"[safe]\ncheck_duty = 18\n", 18}} {
 		c, err := parseConfig([]byte(tc.file))
 		if err != nil || c.Safe.CheckDuty != tc.want {
 			t.Errorf("%q: check_duty %g (want %g), err %v", tc.file, c.Safe.CheckDuty, tc.want, err)

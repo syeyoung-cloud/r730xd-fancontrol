@@ -46,7 +46,7 @@ type cpuModel struct{ pb, r0, k, n, scale float64 }
 var (
 	mode0, controlToken, listen                            string
 	requiredTemps                                          []string
-	hddMin                                                 int
+	hddMin, fanCount                                       int
 	fanMinRPM                                              float64
 	fixedPct0                                              int
 	minPct, cpuTarget, modelMargin, cpuLimit, emergencyPct float64
@@ -98,9 +98,16 @@ func validateConfig() {
 		"need 100 <= power.cap_min < power.cap_max <= 2000, both whole watts, power.cap_step > 0")
 	check(fin(safeDuty, safeCap) && safeDuty >= minPct && safeDuty <= 100 && safeCap >= pcapMin && safeCap <= pcapMax && safeCap == math.Trunc(safeCap),
 		"safe.duty must be model.min_duty-100, safe.cap whole watts within power.cap_min-power.cap_max")
-	check(fin(safeCheckDuty) && safeCheckDuty > 0 && safeCheckDuty <= safeDuty, "safe.check_duty must be above 0 and at most safe.duty")
+	check(safeDuty == math.Trunc(safeDuty), "safe.duty must be a whole percent")
+	check(fin(safeCheckDuty) && safeCheckDuty > 0 && safeCheckDuty < safeDuty,
+		"safe.check_duty must be above 0 and below safe.duty (the fans need a margin to read above it)")
+	if safeClamp { // otherwise safe can never be confirmed and every unknown input ends in a poweroff
+		_, err := clampState()
+		check(err == nil, "safe.clamp needs intel_pstate (%v); set safe.clamp = false on this machine", err)
+	}
 	check(unknownAfter >= interval && unknownAfter <= time.Minute, "inputs.unknown_after must be inputs.interval-60 s")
 	check(len(cpuModels) >= 1 && len(fanRPMTab) >= 2, "model.cpu_models needs >= 1 entry, model.fan_rpm_table >= 2 points")
+	check(fanCount >= 0, "inputs.fan_count must be >= 0")
 	check(hddMin >= 0 && fanMinRPM >= 0, "inputs.hdd_min and inputs.fan_min_rpm must be >= 0")
 	check(ki >= 0 && iMax >= 0 && kw >= 0, "model.ki, model.i_max, power.kw must be >= 0")
 	check(len(exhaustModel) == 2 && fin(exhaustModel...) && exhaustModel[0] >= 0 && exhaustModel[1] >= 0 && exhaustModel[0]+exhaustModel[1] < 1,
@@ -231,7 +238,6 @@ func inletOf(temps map[string]float64) float64 {
 
 type decision struct {
 	target              float64
-	ok                  bool // false = hand the fans to the iDRAC
 	why                 string
 	d                   demand
 	modelPart, warmPart float64
@@ -239,14 +245,15 @@ type decision struct {
 	exhExpected         float64 // model.exhaust_model's expected exhaust, 0 = not used this cycle
 }
 
-func decide(temps, hdd map[string]float64, watts float64, model bool, modelI float64) decision {
+// decide: the duty each part asks for, and the highest of them. Danger lines are classify's business.
+func decide(temps, hdd map[string]float64, watts float64, modelI float64) decision {
 	var r decision
 	cpu, exhaust, disk := hottestCPU(temps), temps["Exhaust"], 0.0
 	for _, v := range hdd {
 		disk = math.Max(disk, v)
 	}
 	cpuDemand := interp(cpuCurve, cpu)
-	if model && watts > 0 { // feedforward from power + integral, never below the warm floor
+	if watts > 0 { // feedforward from power + integral, never below the warm floor; else the CPU curve
 		r.modelPart, r.warmPart, r.modelRan = modelPct(watts, inletOf(temps))+modelI, interp(warmCurve, cpu), true
 		cpuDemand = math.Max(r.modelPart, r.warmPart)
 	}
@@ -256,27 +263,14 @@ func decide(temps, hdd map[string]float64, watts float64, model bool, modelI flo
 		r.exhExpected = in + exhaustModel[0]*(cpu-in) + exhaustModel[1]*(disk-in)
 		r.d.exhaust = interp(exhaustExcessCurve, exhaust-r.exhExpected)
 	}
-	switch {
-	case cpu >= cpuAuto:
-		r.why = fmt.Sprintf("cpu %.0fC >= %.0f", cpu, cpuAuto)
-	case disk >= hddAuto:
-		r.why = fmt.Sprintf("hdd %.0fC >= %.0f", disk, hddAuto)
-	case exhaust >= exhaustAuto:
-		r.why = fmt.Sprintf("exhaust %.0fC >= %.0f", exhaust, exhaustAuto)
-	default:
-		src, v := "cpu", r.d.cpu
-		if r.d.hdd > v {
-			src, v = "hdd", r.d.hdd
-		}
-		if r.d.exhaust > v {
-			src, v = "exhaust", r.d.exhaust
-		}
-		kind := "curve"
-		if model {
-			kind = "model"
-		}
-		r.target, r.ok, r.why = v, true, fmt.Sprintf("%s (%s)", kind, src)
+	src, v := "cpu", r.d.cpu
+	if r.d.hdd > v {
+		src, v = "hdd", r.d.hdd
 	}
+	if r.d.exhaust > v {
+		src, v = "exhaust", r.d.exhaust
+	}
+	r.target, r.why = v, fmt.Sprintf("model (%s)", src)
 	return r
 }
 

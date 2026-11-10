@@ -14,7 +14,7 @@ duty  = 20
 cap   = 230                    # iDRAC power cap, W
 clamp = true                   # CPUs at their lowest frequency, no turbo (intel_pstate)
 # check_duty = 15              # in effect: fans at least this duty's RPM, power cap <= cap, clamp on;
-                               # not in effect within 15 s -> shutdown. Default: min(15, duty)
+                               # not in effect within 15 s -> shutdown. Default: min(15, 0.75 * duty)
 
 [model]
 min_duty       = 10
@@ -52,7 +52,9 @@ kw       = 8                   # cap correction, W per C per minute
 
 [inputs]
 required_temps = ["CPU1", "Inlet", "Exhaust"]   # never seen -> unknown
-hdd_min        = 0             # fewer drives visible -> unknown
+hdd_min        = 0             # fewer drives visible -> unknown. Set it (e.g. to your drive count):
+                               # with 0, a PERC that loses every drive just means nothing to watch
+fan_count      = 0             # fans that must be reading (0 = no requirement); an absent fan counts
 fan_min_rpm    = 1000          # a fan below this (dead, stalled) -> unknown
 interval       = "5s"          # 1-10 s (systemd watchdog: 60 s)
 hdd_interval   = "300s"

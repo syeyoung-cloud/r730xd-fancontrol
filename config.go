@@ -104,6 +104,7 @@ type config struct {
 	Inputs struct {
 		RequiredTemps []string `toml:"required_temps"`
 		HDDMin        int      `toml:"hdd_min"`
+		FanCount      int      `toml:"fan_count"` // fans that must be reading (0 = no requirement)
 		FanMinRPM     float64  `toml:"fan_min_rpm"`
 		Interval      duration `toml:"interval"`
 		HDDInterval   duration `toml:"hdd_interval"`
@@ -161,8 +162,8 @@ func parseConfig(b []byte) (config, error) {
 	if c.Mode == "auto" {
 		c.Mode = "idrac"
 	}
-	if !md.IsDefined("safe", "check_duty") { // default: 15 %, never above safe.duty (an explicit 0 is refused)
-		c.Safe.CheckDuty = min(15, c.Safe.Duty)
+	if !md.IsDefined("safe", "check_duty") { // default: 15 %, kept well below safe.duty (an explicit 0 is refused)
+		c.Safe.CheckDuty = min(15, 0.75*c.Safe.Duty)
 	}
 	if c.Fixed.CPUMax == 0 {
 		c.Fixed.CPUMax = c.Shutdown.CPU - 3
@@ -204,7 +205,7 @@ func apply(c config) {
 	pcapMin, pcapMax, pcapStep, kw = c.Power.CapMin, c.Power.CapMax, c.Power.CapStep, c.Power.KW
 	in := c.Inputs
 	requiredTemps = append([]string(nil), in.RequiredTemps...)
-	hddMin, fanMinRPM = in.HDDMin, in.FanMinRPM
+	hddMin, fanCount, fanMinRPM = in.HDDMin, in.FanCount, in.FanMinRPM
 	interval, hddInterval, hddRescan, reassert = time.Duration(in.Interval), time.Duration(in.HDDInterval), time.Duration(in.HDDRescan), time.Duration(in.Reassert)
 	unknownAfter = time.Duration(in.UnknownAfter)
 	listen = strings.Join(c.HTTP.Listen, ",")

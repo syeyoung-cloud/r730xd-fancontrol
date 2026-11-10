@@ -10,8 +10,8 @@ needs no `ipmitool`, `smartctl`, Python or containers. It also exports Prometheu
 
 ## How it works
 
-Every `inputs.interval` seconds fanctl reads the inlet, exhaust and CPU temperatures, fan RPM and wall
-power from the BMC. Drive temperatures come through the PERC every `inputs.hdd_interval` seconds, on their
+Every `inputs.interval` seconds fanctl reads the CPU temperatures from the kernel (coretemp) and the
+inlet and exhaust temperatures, fan RPM and wall power from the BMC. Drive temperatures come through the PERC every `inputs.hdd_interval` seconds, on their
 own thread. It then picks a duty and sets it with Dell's OEM fan command (`0x30 0x30`).
 
 Modes (`mode`):
@@ -118,8 +118,9 @@ Errors are data, not branches. Each cycle: **sense → classify → pick → con
     temperatures. It must be **verifiably** in effect: fans reading at least `safe.check_duty`'s RPM
     (faster is fine), the cap at most `safe.cap`, the clamp on. Until then it re-sends its settings;
     not in effect after 15 s → shutdown.
-  - shutdown: fans to the iDRAC, CPUs at minimum power, and a clean OS poweroff
-    (`systemctl poweroff`), once.
+  - shutdown: a clean OS poweroff first (`systemctl --no-block poweroff`), then the fans to the
+    iDRAC and the CPUs to minimum power (retried until the poweroff is accepted); the stop hook keeps
+    minimum power through the OS shutdown.
 - **Act.** Each controller writes through one path: the clamp, then the power cap, then the fans,
   each only when it differs (the cap also when its read-back differs; safe re-sends its duty while
   the fans read low).
@@ -143,7 +144,8 @@ and ages are saved every cycle in `/run/fanctl/inputs.json`, so a restart contin
 | whole OS hangs | optional BMC hardware watchdog resets the server |
 | boot | `fanctl-failsafe.service` sets iDRAC auto before fanctl starts |
 | diagnosing (`sudo touch /etc/fanctl.idrac`) | within a cycle the iDRAC runs the fans and handles everything, real danger included: no safe, no shutdown from fanctl. Survives reboots; `sudo rm /etc/fanctl.idrac` hands the fans back |
-| iDRAC reset | fanctl re-sends its duty every `inputs.reassert` s and takes the fans back |
+| iDRAC reset or firmware update | the BMC stops answering, so safe can't be confirmed: **the host powers off** ~35 s later. Touch `/etc/fanctl.idrac` before resetting or updating the iDRAC, remove it afterwards |
+| the iDRAC takes the fans back on its own (it still answers) | fanctl re-sends its duty every `inputs.reassert` s |
 
 ## Requirements
 

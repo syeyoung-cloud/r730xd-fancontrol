@@ -948,3 +948,18 @@ func TestCycleIdracOverride(t *testing.T) {
 		t.Fatalf("override removed: %q", c.state)
 	}
 }
+
+// A fan absent from the start is never stored; inputs.fan_count still counts it: fewer fans reading -> safe.
+func TestCycleFanCount(t *testing.T) {
+	c, f, get := rig(t)
+	loadConfigBytes([]byte("[inputs]\nrequired_temps = [\"CPU1\", \"CPU2\", \"Inlet\", \"Exhaust\"]\ninterval = \"5s\"\nfan_count = 2\n"))
+	f.missing["Fan2"] = true // "not present" from boot
+	run(c, f, at(0))
+	if _, seen := c.in.Fans["Fan2"]; seen {
+		t.Fatal("absent fan stored")
+	}
+	want(t, 0, c, f, get, "20", int(pcapMin), true)
+	f.missing["Fan2"] = false
+	run(c, f, at(5))
+	want(t, 5, c, f, get, "18", int(pcapMax), false)
+}

@@ -5,7 +5,7 @@ After=fanctl-failsafe.service
 
 [Service]
 Type=notify
-# settings: /etc/fanctl.toml (read by fanctl itself; fanctl auto reads only power.cap_max, leniently)
+# settings: /etc/fanctl.toml (read by fanctl itself; fanctl auto reads only power.cap_min / cap_max, leniently)
 # create the PERC ioctl node (the driver doesn't), outside the sandbox
 ExecStartPre=-+/usr/local/bin/fanctl prepare
 ExecStart=/usr/local/bin/fanctl

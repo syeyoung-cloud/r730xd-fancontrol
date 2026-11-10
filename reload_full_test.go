@@ -110,6 +110,14 @@ func TestReloadRefusesEmptyCurve(t *testing.T) {
 	if _, err := prepareReload(); err == nil {
 		t.Fatal("explicit check_duty = 0 accepted")
 	}
+	os.WriteFile(file, []byte("[safe]\ncheck_duty = 20\n"), 0o600) // = safe.duty: no margin
+	if _, err := prepareReload(); err == nil {
+		t.Fatal("check_duty equal to safe.duty accepted")
+	}
+	os.WriteFile(file, []byte("[safe]\nduty = 20.5\n"), 0o600)
+	if _, err := prepareReload(); err == nil {
+		t.Fatal("fractional safe.duty accepted")
+	}
 }
 
 // A reload re-reading the same mode doesn't undo a fixed -> model hand-over; a changed mode applies.

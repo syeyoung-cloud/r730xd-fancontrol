@@ -119,7 +119,7 @@ var idracOverride = "/etc/fanctl.idrac"
 var shutdownMark = "/run/fanctl/shutdown"
 
 // poweroff: the last resort. A clean OS shutdown, so it works without the BMC (a var: tests replace it).
-var poweroff = func() error { return exec.Command("systemctl", "poweroff").Run() }
+var poweroff = func() error { return exec.Command("systemctl", "--no-block", "poweroff").Run() }
 
 type controller struct {
 	bmc     bmcAPI
@@ -151,6 +151,7 @@ type controller struct {
 	hddSnap         time.Time         // drive snapshot last looked at (implausible values are logged once per snapshot)
 	readWhy         map[string]string // what each source answered for a reading it didn't give, this cycle
 	scanLogged      time.Time         // drive scan whose missing temperatures were logged
+	lastRead        time.Time         // last cycle with fresh BMC readings
 	saveErr         string
 	poweredOff      bool // poweroff accepted: nothing more to do
 }
@@ -193,6 +194,9 @@ func (c *controller) sense(now time.Time) {
 	cpus, cwhy := senseCoretemp()
 	maps.Copy(temps, cpus)
 	maps.Copy(why, cwhy)
+	if len(fans) > 0 { // the BMC answered with readings
+		c.lastRead = now
+	}
 	for k, v := range temps {
 		c.in.Temps[k] = input{v, now}
 	}
@@ -367,6 +371,8 @@ func (c *controller) logInputs(ns []named) {
 		switch v := value(n.r); {
 		case n.kind == kindDriveCount && v < float64(hddMin) && !isNeverSeen(n.r):
 			log.Printf("%sdrive scan found %g drives (inputs.hdd_min %d): unknown", prErr, v, hddMin)
+		case n.kind == kindFanCount && v < float64(fanCount):
+			log.Printf("%s%g fans reading (inputs.fan_count %d): unknown", prErr, v, fanCount)
 		case n.kind == kindFan && v < fanMinRPM && !isNeverSeen(n.r):
 			log.Printf("%sfan %s at %g rpm (inputs.fan_min_rpm %g): unknown", prErr, n.key, v, fanMinRPM)
 		case n.kind == kindDrive && c.in.Scan.Seen != c.scanLogged && classify(n) == classOK &&
@@ -445,6 +451,7 @@ const (
 	kindOtherTemp // inlet: no limit of its own
 	kindFan
 	kindDriveCount // drives found by the scan: fewer than inputs.hdd_min -> unknown
+	kindFanCount   // fans reading: fewer than inputs.fan_count -> unknown
 	kindOther      // read-backs: only "known or not"
 )
 
@@ -492,6 +499,13 @@ func (c *controller) readings(now time.Time) []named {
 		out = append(out, named{"drive " + k, kindDrive, readingOf(c.in.HDD[k], hddInterval+driveSlack, now)})
 	}
 	out = append(out, named{"drive scan", kindDriveCount, readingOf(c.in.Scan, hddInterval+driveSlack, now)})
+	usable := 0 // fans reading now (one absent from boot is never stored: this counts it)
+	for _, in := range c.in.Fans {
+		if !in.Seen.IsZero() && c.overdue(in.Seen, interval, now) < unknownAfter {
+			usable++
+		}
+	}
+	out = append(out, named{"fan count", kindFanCount, Fresh{float64(usable)}})
 	out = append(out, named{"power cap", kindOther, readingOf(c.in.Cap, reassert, now)})
 	if safeClamp {
 		out = append(out, named{"CPU clamp", kindOther, readingOf(c.in.Clamp, interval, now)})
@@ -565,6 +579,10 @@ func classify(n named) Class {
 		}
 	case kindDriveCount:
 		if v < float64(hddMin) { // drives missing, or the PERC lost them: not "fewer drives to watch"
+			return classUnknown
+		}
+	case kindFanCount:
+		if v < float64(fanCount) {
 			return classUnknown
 		}
 	}
@@ -800,8 +818,7 @@ func (c *controller) normal(temps, hdd map[string]float64, watts float64) (decis
 	capW := int(pcapMax)
 	ivl := interval.Seconds()
 	ramping := c.duty > 0
-	switch {
-	default:
+	{
 		// feedforward power: RAPL reacts within a cycle; the iDRAC wall reading lags ~30 s.
 		// wall ~= RAPL + offset (fans, drives, RAM, PSU loss), learned slowly (~5 min)
 		pr, hasPr := raplWatts()
@@ -816,7 +833,7 @@ func (c *controller) normal(temps, hdd map[string]float64, watts float64) (decis
 		if hasPr && c.raplLearned {
 			ff = math.Max(watts, pr+c.raplOff)
 		}
-		r = decide(temps, hdd, ff, true, c.modelI)
+		r = decide(temps, hdd, ff, c.modelI)
 		st.Lock()
 		st.ffWatts = ff
 		st.Unlock()
@@ -1065,7 +1082,7 @@ func (c *controller) cycle(now time.Time) {
 	for k, in := range c.in.HDD {
 		st.ages["drive "+k] = now.Sub(orStart(in.Seen, c.start)).Seconds()
 	}
-	st.lastOK = float64(now.UnixMilli()) / 1000
+	st.lastOK = float64(c.lastRead.UnixMilli()) / 1000
 	st.Unlock()
 }
 
