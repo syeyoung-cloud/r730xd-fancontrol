@@ -84,9 +84,8 @@ func cmdBench(args []string) {
 	if err1 != nil || err2 != nil {
 		log.Fatalf("bench: -duties / -caps: %v %v", err1, err2)
 	}
-	if fi, err := os.Stat(stateFile); err == nil && time.Since(fi.ModTime()) < 30*time.Second {
-		log.Fatalf("bench: fanctl is running (%s written %s ago): sudo systemctl stop fanctl first",
-			stateFile, time.Since(fi.ModTime()).Round(time.Second))
+	if exec.Command("systemctl", "is-active", "--quiet", "fanctl").Run() == nil { // exit 0 = active
+		log.Fatal("bench: fanctl is running: sudo systemctl stop fanctl first")
 	}
 	bmc, err := OpenBMC()
 	if err != nil {
