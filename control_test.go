@@ -963,3 +963,17 @@ func TestCycleFanCount(t *testing.T) {
 	run(c, f, at(5))
 	want(t, 5, c, f, get, "18", int(pcapMax), false)
 }
+
+// The bench walks the grid in a snake: every step changes one thing by one level.
+func TestBenchOrder(t *testing.T) {
+	got := benchOrder([]int{10, 15, 20}, []int{230, 290, 320})
+	want := []benchPoint{{10, 230}, {15, 230}, {20, 230}, {20, 290}, {15, 290}, {10, 290}, {10, 320}, {15, 320}, {20, 320}}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("point %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+}

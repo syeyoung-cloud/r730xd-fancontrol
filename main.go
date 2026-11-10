@@ -16,6 +16,7 @@
 //	fanctl probe          print every reading fanctl uses; changes nothing
 //	fanctl prepare        create the PERC ioctl node if missing (run as root before the service)
 //	fanctl check [file|-] validate a config file; exit 1 if refused
+//	fanctl bench          measure the thermal model (fanctl stopped; see bench.go)
 package main
 
 import (
@@ -708,6 +709,9 @@ func main() {
 	case "prepare":
 		cmdPrepare()
 		return
+	case "bench": // measure the thermal model (fanctl stopped)
+		cmdBench(os.Args[2:])
+		return
 	case "check": // validate a config file ("-" = stdin; used by reload); exits 1 if refused
 		path := configPath()
 		if len(os.Args) > 2 {
@@ -717,7 +721,7 @@ func main() {
 		return
 	case "run":
 	default:
-		fmt.Fprintln(os.Stderr, "usage: fanctl [run|auto|probe|prepare|check [file|-]]")
+		fmt.Fprintln(os.Stderr, "usage: fanctl [run|auto|probe|prepare|check [file|-]|bench [-h]]")
 		os.Exit(2)
 	}
 
