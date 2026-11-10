@@ -163,6 +163,11 @@ func newController(bmc bmcAPI) *controller {
 	return c
 }
 
+// recent: the input read within unknownAfter of its due time (usable).
+func (c *controller) recent(in input, period time.Duration, now time.Time) bool {
+	return !in.Seen.IsZero() && c.overdue(in.Seen, period, now) < unknownAfter
+}
+
 // overdue: how far past its normal refresh an input is.
 func (c *controller) overdue(seen time.Time, period time.Duration, now time.Time) time.Duration {
 	if seen.IsZero() {
@@ -194,7 +199,7 @@ func (c *controller) sense(now time.Time) {
 	cpus, cwhy := senseCoretemp()
 	maps.Copy(temps, cpus)
 	maps.Copy(why, cwhy)
-	if len(fans) > 0 { // the BMC answered with readings
+	if len(fans) > 0 && !c.bmcDown { // the BMC answered the whole walk
 		c.lastRead = now
 	}
 	for k, v := range temps {
@@ -372,7 +377,14 @@ func (c *controller) logInputs(ns []named) {
 		case n.kind == kindDriveCount && v < float64(hddMin) && !isNeverSeen(n.r):
 			log.Printf("%sdrive scan found %g drives (inputs.hdd_min %d): unknown", prErr, v, hddMin)
 		case n.kind == kindFanCount && v < float64(fanCount):
-			log.Printf("%s%g fans reading (inputs.fan_count %d): unknown", prErr, v, fanCount)
+			var gone []string // fans the BMC answered for without a reading (absent ones aren't stored)
+			for k, w := range c.readWhy {
+				if strings.HasPrefix(k, "Fan") && !c.recent(c.in.Fans[k], interval, time.Now()) {
+					gone = append(gone, k+" ("+w+")")
+				}
+			}
+			sort.Strings(gone)
+			log.Printf("%s%g fans reading (inputs.fan_count %d): unknown; %s", prErr, v, fanCount, strings.Join(gone, ", "))
 		case n.kind == kindFan && v < fanMinRPM && !isNeverSeen(n.r):
 			log.Printf("%sfan %s at %g rpm (inputs.fan_min_rpm %g): unknown", prErr, n.key, v, fanMinRPM)
 		case n.kind == kindDrive && c.in.Scan.Seen != c.scanLogged && classify(n) == classOK &&
@@ -501,7 +513,7 @@ func (c *controller) readings(now time.Time) []named {
 	out = append(out, named{"drive scan", kindDriveCount, readingOf(c.in.Scan, hddInterval+driveSlack, now)})
 	usable := 0 // fans reading now (one absent from boot is never stored: this counts it)
 	for _, in := range c.in.Fans {
-		if !in.Seen.IsZero() && c.overdue(in.Seen, interval, now) < unknownAfter {
+		if c.recent(in, interval, now) {
 			usable++
 		}
 	}
@@ -773,12 +785,11 @@ func (c *controller) ctlShutdown(why string, now time.Time) {
 // safeMismatch: why the safe controller isn't in effect by its read-backs ("" = it is): the fans at
 // least safe.check_duty's RPM, the power cap at most safe.cap, the clamp on if [safe] uses it.
 func (c *controller) safeMismatch(now time.Time) string {
-	usable := func(in input) bool { return !in.Seen.IsZero() && c.overdue(in.Seen, interval, now) < unknownAfter }
 	var bad []string
 	if c.in.Cap.Seen.IsZero() || c.overdue(c.in.Cap.Seen, reassert, now) >= unknownAfter || c.in.Cap.V > safeCap {
 		bad = append(bad, fmt.Sprintf("power cap reads %g W, want <= %g", c.in.Cap.V, safeCap))
 	}
-	if safeClamp && (!usable(c.in.Clamp) || c.in.Clamp.V != 1) {
+	if safeClamp && (!c.recent(c.in.Clamp, interval, now) || c.in.Clamp.V != 1) {
 		bad = append(bad, "CPU clamp not in place")
 	}
 	if med, ok := c.safeFanRPM(now); !ok {
@@ -794,7 +805,7 @@ func (c *controller) safeMismatch(now time.Time) string {
 func (c *controller) safeFanRPM(now time.Time) (med float64, ok bool) {
 	var rpm []float64
 	for _, in := range c.in.Fans {
-		if !in.Seen.IsZero() && c.overdue(in.Seen, interval, now) < unknownAfter {
+		if c.recent(in, interval, now) {
 			rpm = append(rpm, in.V)
 		}
 	}
@@ -818,86 +829,84 @@ func (c *controller) normal(temps, hdd map[string]float64, watts float64) (decis
 	capW := int(pcapMax)
 	ivl := interval.Seconds()
 	ramping := c.duty > 0
-	{
-		// feedforward power: RAPL reacts within a cycle; the iDRAC wall reading lags ~30 s.
-		// wall ~= RAPL + offset (fans, drives, RAM, PSU loss), learned slowly (~5 min)
-		pr, hasPr := raplWatts()
-		if hasPr && watts > 0 {
-			if !c.raplLearned {
-				c.raplOff, c.raplLearned = watts-pr, true
-			} else {
-				c.raplOff += ivl / 300 * (watts - pr - c.raplOff)
-			}
+	// feedforward power: RAPL reacts within a cycle; the iDRAC wall reading lags ~30 s.
+	// wall ~= RAPL + offset (fans, drives, RAM, PSU loss), learned slowly (~5 min)
+	pr, hasPr := raplWatts()
+	if hasPr && watts > 0 {
+		if !c.raplLearned {
+			c.raplOff, c.raplLearned = watts-pr, true
+		} else {
+			c.raplOff += ivl / 300 * (watts - pr - c.raplOff)
 		}
-		ff := watts
-		if hasPr && c.raplLearned {
-			ff = math.Max(watts, pr+c.raplOff)
-		}
-		r = decide(temps, hdd, ff, c.modelI)
-		st.Lock()
-		st.ffWatts = ff
-		st.Unlock()
-		d, hot := r.d, hottestCPU(temps)
-		over := hot - cpuTarget
-		pinned := fanMax > 0 && d.cpu >= fanMax
-		cpuEff := d.cpu
-		if fanMax > 0 {
-			cpuEff = math.Min(d.cpu, fanMax)
-			if pinned { // CPU wants more than model.fan_max: hold the fans there, power does the rest
-				r.target = math.Max(fanMax, math.Max(d.hdd, d.exhaust))
-				r.why = fmt.Sprintf("model (fan ceiling %.0f%%, power capped)", fanMax)
-			}
-			// cap: most power that settles at model.cpu_target with fans at model.fan_max, plus a correction
-			// that tightens while the CPU is still above target at the ceiling
-			h := c.hotHist
-			if pinned && over > 0 && (over >= 2 || (len(h) > 1 && h[len(h)-1] >= h[0])) {
-				c.capCorr -= kw * over * ivl / 60
-			} else if over < -2 {
-				c.capCorr = math.Min(0, c.capCorr+kw*ivl/60)
-			}
-			c.capCorr = math.Max(-150, math.Min(0, c.capCorr))
-			want := modelMaxWatts(inletOf(temps), fanMax) + c.capCorr
-			if want >= pcapMax {
-				want = pcapMax
-			} else {
-				want = math.Max(pcapMin, want)
-			}
-			if math.IsNaN(want) || math.IsInf(want, 0) {
-				return r, 0, fmt.Errorf("power cap computed as %v", want)
-			}
-			if c.modelCap == 0 || math.Abs(want-c.modelCap) >= pcapStep || (want == pcapMax) != (c.modelCap == pcapMax) {
-				c.modelCap = math.Round(want)
-			}
-			capW = int(c.modelCap)
-		}
-		emergency := hot >= cpuLimit
-		if emergency { // past the hard line: no waiting
-			r.target, r.why = math.Max(r.target, emergencyPct), fmt.Sprintf("cpu %.0fC >= limit %.0f", hot, cpuLimit)
-		} else if ramping && r.target < c.duty { // step up at once, down <= 2%/cycle
-			r.target = math.Max(r.target, c.duty-2)
-		}
-		// correction (anti-windup): only while the fans really run at the CPU's own demand, the
-		// temperature is near the target, and the duty can still move that way
-		c.hotHist = append(c.hotHist, hot)
-		if n := max(2, int(60/ivl)+1); len(c.hotHist) > n {
-			c.hotHist = c.hotHist[len(c.hotHist)-n:]
-		}
-		lo, hi := c.hotHist[0], c.hotHist[0]
-		for _, v := range c.hotHist {
-			lo, hi = math.Min(lo, v), math.Max(hi, v)
-		}
-		settled := float64(len(c.hotHist)) > 60/ivl && hi-lo <= 1
-		// ... and only while the model's own request (not the warm floor) sets the CPU demand, from
-		// real readings (a bridged value would train it on stale data)
-		onCPU := !emergency && r.modelRan && r.modelPart >= r.warmPart && math.Abs(r.target-cpuEff) < 0.5 &&
-			cpuEff >= math.Max(d.hdd, d.exhaust)
-		if len(c.held) == 0 && settled && onCPU && math.Abs(over) < 5 && !(d.cpu <= minPct && over < 0) && !(pinned && over > 0) {
-			c.modelI = math.Max(-iMax, math.Min(iMax, c.modelI+ki*over*ivl/60))
-		}
-		st.Lock()
-		st.modelI, st.capCorr, st.modelOn = c.modelI, c.capCorr, true
-		st.Unlock()
 	}
+	ff := watts
+	if hasPr && c.raplLearned {
+		ff = math.Max(watts, pr+c.raplOff)
+	}
+	r = decide(temps, hdd, ff, c.modelI)
+	st.Lock()
+	st.ffWatts = ff
+	st.Unlock()
+	d, hot := r.d, hottestCPU(temps)
+	over := hot - cpuTarget
+	pinned := fanMax > 0 && d.cpu >= fanMax
+	cpuEff := d.cpu
+	if fanMax > 0 {
+		cpuEff = math.Min(d.cpu, fanMax)
+		if pinned { // CPU wants more than model.fan_max: hold the fans there, power does the rest
+			r.target = math.Max(fanMax, math.Max(d.hdd, d.exhaust))
+			r.why = fmt.Sprintf("model (fan ceiling %.0f%%, power capped)", fanMax)
+		}
+		// cap: most power that settles at model.cpu_target with fans at model.fan_max, plus a correction
+		// that tightens while the CPU is still above target at the ceiling
+		h := c.hotHist
+		if pinned && over > 0 && (over >= 2 || (len(h) > 1 && h[len(h)-1] >= h[0])) {
+			c.capCorr -= kw * over * ivl / 60
+		} else if over < -2 {
+			c.capCorr = math.Min(0, c.capCorr+kw*ivl/60)
+		}
+		c.capCorr = math.Max(-150, math.Min(0, c.capCorr))
+		want := modelMaxWatts(inletOf(temps), fanMax) + c.capCorr
+		if want >= pcapMax {
+			want = pcapMax
+		} else {
+			want = math.Max(pcapMin, want)
+		}
+		if math.IsNaN(want) || math.IsInf(want, 0) {
+			return r, 0, fmt.Errorf("power cap computed as %v", want)
+		}
+		if c.modelCap == 0 || math.Abs(want-c.modelCap) >= pcapStep || (want == pcapMax) != (c.modelCap == pcapMax) {
+			c.modelCap = math.Round(want)
+		}
+		capW = int(c.modelCap)
+	}
+	emergency := hot >= cpuLimit
+	if emergency { // past the hard line: no waiting
+		r.target, r.why = math.Max(r.target, emergencyPct), fmt.Sprintf("cpu %.0fC >= limit %.0f", hot, cpuLimit)
+	} else if ramping && r.target < c.duty { // step up at once, down <= 2%/cycle
+		r.target = math.Max(r.target, c.duty-2)
+	}
+	// correction (anti-windup): only while the fans really run at the CPU's own demand, the
+	// temperature is near the target, and the duty can still move that way
+	c.hotHist = append(c.hotHist, hot)
+	if n := max(2, int(60/ivl)+1); len(c.hotHist) > n {
+		c.hotHist = c.hotHist[len(c.hotHist)-n:]
+	}
+	lo, hi := c.hotHist[0], c.hotHist[0]
+	for _, v := range c.hotHist {
+		lo, hi = math.Min(lo, v), math.Max(hi, v)
+	}
+	settled := float64(len(c.hotHist)) > 60/ivl && hi-lo <= 1
+	// ... and only while the model's own request (not the warm floor) sets the CPU demand, from
+	// real readings (a bridged value would train it on stale data)
+	onCPU := !emergency && r.modelRan && r.modelPart >= r.warmPart && math.Abs(r.target-cpuEff) < 0.5 &&
+		cpuEff >= math.Max(d.hdd, d.exhaust)
+	if len(c.held) == 0 && settled && onCPU && math.Abs(over) < 5 && !(d.cpu <= minPct && over < 0) && !(pinned && over > 0) {
+		c.modelI = math.Max(-iMax, math.Min(iMax, c.modelI+ki*over*ivl/60))
+	}
+	st.Lock()
+	st.modelI, st.capCorr, st.modelOn = c.modelI, c.capCorr, true
+	st.Unlock()
 	if fanMax <= 0 {
 		c.modelCap = 0
 	}

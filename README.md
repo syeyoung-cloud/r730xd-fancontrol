@@ -101,7 +101,8 @@ Errors are data, not branches. Each cycle: **sense → classify → pick → con
   plus when it last read valid; a failed, timed-out, implausible or "unavailable" read changes
   nothing, the input just gets older. Each one is logged with the source's answer.
 - **Classify.** Each input (each temperature, fan and drive, the drive count against
-  `inputs.hdd_min`, and the read-backs of the power cap and the CPU clamp) is **ok**, **unknown** or
+  `inputs.hdd_min`, the fans reading against `inputs.fan_count`, and the read-backs of the power cap
+  and the CPU clamp) is **ok**, **unknown** or
   **danger**:
   - unknown: never seen this run, or `inputs.unknown_after` (15 s) past its due time (5 s inputs: the
     3rd missed read, 20 s after the last good one; drives: 15 s after a missed `inputs.hdd_interval`
@@ -218,7 +219,7 @@ All settings go in `/etc/fanctl.toml`, one section per controller; see
 | `[model]` | `min_duty`, `fan_max`, `cpu_target`, `margin`, `cpu_limit`, `emergency_duty`, `ki`, `i_max`, the curves (`[[temp, duty], ...]`), `exhaust_model`, `cpu_models`, `fan_rpm_table` |
 | `[fixed]` | `duty` (0-100), `cpu_max` / `hdd_max` / `exhaust_max`: hand over to model at/above (0 = shutdown line − 3) |
 | `[power]` | `cap_min`, `cap_max` ("no cap"), `cap_step`, `kw` |
-| `[inputs]` | `required_temps`, `hdd_min`, `fan_min_rpm`, `interval` (≤ 10 s), `hdd_interval`, `hdd_rescan`, `reassert`, `unknown_after` (durations: `"5s"`) |
+| `[inputs]` | `required_temps`, `hdd_min`, `fan_count`, `fan_min_rpm`, `interval` (≤ 10 s), `hdd_interval`, `hdd_rescan`, `reassert`, `unknown_after` (durations: `"5s"`) |
 | `[http]` | `listen` (list), `token_file`: the `/control` token, kept out of this file |
 
 ## Metrics

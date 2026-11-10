@@ -63,6 +63,18 @@ var (
 	exhaustExcessCurve                                     curve
 )
 
+// checkMachine refuses settings this machine can't carry out (at start and in "fanctl check", never in
+// a running reload): with safe.clamp, intel_pstate must be readable, or safe could never be confirmed
+// and every unknown input would end in a poweroff.
+func checkMachine() {
+	if !safeClamp {
+		return
+	}
+	if _, err := clampState(); err != nil {
+		log.Fatalf("config: safe.clamp needs intel_pstate (%v); set safe.clamp = false on this machine", err)
+	}
+}
+
 // validateConfig refuses settings that would make the controller unsafe or stall the loop past the
 // systemd watchdog. A refused config exits, and systemd leaves the fans with the iDRAC.
 func validateConfig() {
@@ -101,10 +113,6 @@ func validateConfig() {
 	check(safeDuty == math.Trunc(safeDuty), "safe.duty must be a whole percent")
 	check(fin(safeCheckDuty) && safeCheckDuty > 0 && safeCheckDuty < safeDuty,
 		"safe.check_duty must be above 0 and below safe.duty (the fans need a margin to read above it)")
-	if safeClamp { // otherwise safe can never be confirmed and every unknown input ends in a poweroff
-		_, err := clampState()
-		check(err == nil, "safe.clamp needs intel_pstate (%v); set safe.clamp = false on this machine", err)
-	}
 	check(unknownAfter >= interval && unknownAfter <= time.Minute, "inputs.unknown_after must be inputs.interval-60 s")
 	check(len(cpuModels) >= 1 && len(fanRPMTab) >= 2, "model.cpu_models needs >= 1 entry, model.fan_rpm_table >= 2 points")
 	check(fanCount >= 0, "inputs.fan_count must be >= 0")
@@ -270,7 +278,11 @@ func decide(temps, hdd map[string]float64, watts float64, modelI float64) decisi
 	if r.d.exhaust > v {
 		src, v = "exhaust", r.d.exhaust
 	}
-	r.target, r.why = v, fmt.Sprintf("model (%s)", src)
+	label := "model"
+	if watts <= 0 {
+		label = "curve" // no power reading: the CPU curve
+	}
+	r.target, r.why = v, fmt.Sprintf("%s (%s)", label, src)
 	return r
 }
 
@@ -479,7 +491,9 @@ func metrics(w http.ResponseWriter, _ *http.Request) {
 		line(`fanctl_input_age_seconds{input="%s"} %.0f`, lbl(k), st.ages[k])
 	}
 	line("# TYPE fanctl_errors_total counter\nfanctl_errors_total %d", st.errors)
-	line("# TYPE fanctl_last_read_timestamp_seconds gauge\nfanctl_last_read_timestamp_seconds %.3f", st.lastOK)
+	if st.lastOK > 0 { // nothing until the first read
+		line("# TYPE fanctl_last_read_timestamp_seconds gauge\nfanctl_last_read_timestamp_seconds %.3f", st.lastOK)
+	}
 	line(`fanctl_info{mode="%s",reason="%s"} 1`, lbl(st.mode), lbl(st.reason))
 	line("# TYPE fanctl_fixed_percent gauge\nfanctl_fixed_percent %d", st.fixed)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -708,6 +722,7 @@ func main() {
 	}
 
 	loadConfig()
+	checkMachine()
 	controlToken = readToken()
 	st.mode, st.fixed = mode0, fixedPct0
 	bmc, err := OpenBMC()

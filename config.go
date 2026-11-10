@@ -259,6 +259,7 @@ func cmdCheck(path string) {
 		log.Fatalf("config: %v", err)
 	}
 	loadConfigBytes(b)
+	checkMachine()
 	fmt.Println("config ok")
 }
 
