@@ -977,3 +977,22 @@ func TestBenchOrder(t *testing.T) {
 		}
 	}
 }
+
+// A single reading at cpu_limit is a burst, not an emergency: emergency_duty only from the 2nd in a row.
+func TestCycleLimitNeedsTwoReadings(t *testing.T) {
+	c, f, _ := rig(t)
+	run(c, f, at(0))
+	f.vals["CPU2"] = cpuLimit // one reading at the line
+	run(c, f, at(5))
+	if p, _ := strconv.Atoi(f.fan); p >= int(emergencyPct) {
+		t.Fatalf("one reading at cpu_limit: fans %d %%", p)
+	}
+	f.vals["CPU2"] = 51
+	run(c, f, at(10))
+	f.vals["CPU2"] = cpuLimit // two in a row
+	run(c, f, at(15))
+	run(c, f, at(20))
+	if p, _ := strconv.Atoi(f.fan); p != int(emergencyPct) {
+		t.Fatalf("two readings at cpu_limit: fans %d %%, want %g", p, emergencyPct)
+	}
+}

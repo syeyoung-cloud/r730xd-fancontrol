@@ -106,6 +106,7 @@ type dangerRun struct {
 }
 
 const (
+	limitReads  = 2                // consecutive readings at/above model.cpu_limit before emergency_duty
 	dangerReads = 3                // consecutive readings at/above a shutdown line before the poweroff
 	driveSlack  = time.Minute      // a drive pass may run this much longer than usual
 	kickEvery   = 30 * time.Second // missing drive temperatures: re-read at most this often
@@ -117,6 +118,9 @@ var idracOverride = "/etc/fanctl.idrac"
 
 // shutdownMark: present while a shutdown is under way ("fanctl auto" then keeps minimum power).
 var shutdownMark = "/run/fanctl/shutdown"
+
+// raplSource: CPU package power from RAPL (a var: the simulation in sim_test.go replaces it).
+var raplSource = raplWatts
 
 // poweroff: the last resort. A clean OS shutdown, so it works without the BMC (a var: tests replace it).
 var poweroff = func() error { return exec.Command("systemctl", "--no-block", "poweroff").Run() }
@@ -138,6 +142,7 @@ type controller struct {
 	safeOK           time.Time            // safe: last cycle its readbacks matched (or it was entered)
 	danger           map[string]dangerRun // readings at/above their shutdown line, confirming
 	lastKick         time.Time            // last early drive re-read asked for
+	overLimit        int                  // consecutive model cycles with the hottest CPU at/above cpu_limit
 	shutdownTried    bool                 // the shutdown's best-effort writes were tried once
 	off              string               // why the shutdown was decided ("" = none): it stays (latched)
 	bmcDown          bool                 // the BMC didn't answer this cycle
@@ -831,7 +836,7 @@ func (c *controller) normal(temps, hdd map[string]float64, watts float64) (decis
 	ramping := c.duty > 0
 	// feedforward power: RAPL reacts within a cycle; the iDRAC wall reading lags ~30 s.
 	// wall ~= RAPL + offset (fans, drives, RAM, PSU loss), learned slowly (~5 min)
-	pr, hasPr := raplWatts()
+	pr, hasPr := raplSource()
 	if hasPr && watts > 0 {
 		if !c.raplLearned {
 			c.raplOff, c.raplLearned = watts-pr, true
@@ -880,8 +885,15 @@ func (c *controller) normal(temps, hdd map[string]float64, watts float64) (decis
 		}
 		capW = int(c.modelCap)
 	}
-	emergency := hot >= cpuLimit
-	if emergency { // past the hard line: no waiting
+	// cpu_limit counts only when held: limitReads consecutive cycles at or above it (a burst that
+	// peaks for one reading doesn't throw the fans to emergency_duty)
+	if hot >= cpuLimit {
+		c.overLimit++
+	} else {
+		c.overLimit = 0
+	}
+	emergency := c.overLimit >= limitReads
+	if emergency {
 		r.target, r.why = math.Max(r.target, emergencyPct), fmt.Sprintf("cpu %.0fC >= limit %.0f", hot, cpuLimit)
 	} else if ramping && r.target < c.duty { // step up at once, down <= 2%/cycle
 		r.target = math.Max(r.target, c.duty-2)
